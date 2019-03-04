@@ -32,9 +32,9 @@ module.exports = {
    * Recommended values for u-law 8000 hz:
    *
    *   - fftSize == 64 (128 bin FFT)
-   *   - bankCount == 31 
+   *   - bankCount == 31
    *   - Low Frequency == 200
-   *   - High Frequency == 3500 
+   *   - High Frequency == 3500
    */
   constructMelFilterBank: constructMelFilterBank,
   construct: construct
@@ -43,7 +43,7 @@ module.exports = {
 function construct(fftSize, bankCount, lowFrequency, highFrequency, sampleRate) {
   if (!fftSize) throw Error('Please provide an fftSize');
   if (!bankCount) throw Error('Please provide a bankCount');
-  if (!lowFrequency) throw Error('Please provide a low frequency cutoff.');
+  if (isNaN(lowFrequency) || lowFrequency < 0) throw Error('Please provide a low frequency cutoff.');
   if (!highFrequency) throw Error('Please provide a high frequency cutoff.');
   if (!sampleRate) throw Error('Please provide a valid sampleRate.');
 
@@ -62,8 +62,14 @@ function construct(fftSize, bankCount, lowFrequency, highFrequency, sampleRate) 
 
     var //powers = powerSpectrum(fft),
         melSpec = filterBank.filter(fft),
-        melSpecLog = melSpec.map(log),
-        melCoef = dct(melSpecLog).slice(0,13),
+        melSpecLog = melSpec.map(Math.log),
+        melCoef = dct(melSpecLog).slice(0,13).map(function(c, index) {
+          // 'ortho' normalization as in scipy.fftpack.dct (Type II)
+          // https://docs.scipy.org/doc/scipy/reference/generated/scipy.fftpack.dct.html
+          const norm = 1 / Math.sqrt(2*melSpecLog.length);
+          if (index === 0) return c * norm / Math.sqrt(2);
+          return c * norm;
+        }),
         power = melCoef.splice(0,1);
 
     return debug ? {
@@ -73,8 +79,6 @@ function construct(fftSize, bankCount, lowFrequency, highFrequency, sampleRate) 
       filters: filterBank,
       power: power
     } : melCoef;
-
-    function log(m){return Math.log(1+m);};
   }
 }
 
@@ -88,7 +92,7 @@ function constructMelFilterBank(fftSize, nFilters, lowF, highF, sampleRate) {
       deltaM = (highM - lowM) / (nFilters+1);
 
   // Construct equidistant Mel values between lowM and highM.
-  for (var i = 0; i < nFilters; i++) {
+  for (var i = 0; i < nFilters + 2; i++) {
     // Get the Mel value and convert back to frequency.
     // e.g. 200 hz <=> 401.25 Mel
     fq[i] = melsToHz(lowM + (i * deltaM));
@@ -100,27 +104,22 @@ function constructMelFilterBank(fftSize, nFilters, lowF, highF, sampleRate) {
 
   // Construct one cone filter per bin.
   // Filters end up looking similar to [... 0, 0, 0.33, 0.66, 1.0, 0.66, 0.33, 0, 0...]
-  for (var i = 0; i < bins.length; i++)
+  for (var i = 0; i < bins.length - 2; i++)
   {
     filters[i] = [];
-    var filterRange = (i != bins.length-1) ? bins[i+1] - bins[i] : bins[i] - bins[i-1];
-    filters[i].filterRange = filterRange;
     for (var f = 0; f < fftSize; f++) {
       // Right, outside of cone
-      if (f > bins[i] + filterRange) filters[i][f] = 0.0;
+      if (f > bins[i+2]) filters[i][f] = 0.0;
       // Right edge of cone
-      else if (f > bins[i]) filters[i][f] = 1.0 - ((f - bins[i]) / filterRange);
+      else if (f > bins[i+1]) filters[i][f] = 1.0 - ((f - bins[i+1]) / (bins[i+2] - bins[i+1]));
       // Peak of cone
-      else if (f == bins[i]) filters[i][f] = 1.0;
+      else if (f == bins[i+1]) filters[i][f] = 1.0;
       // Left edge of cone
-      else if (f >= bins[i] - filterRange) filters[i][f] = 1.0 - (bins[i] - f) / filterRange;
+      else if (f >= bins[i]) filters[i][f] = 1.0 - (bins[i+1] - f) / (bins[i+1] - bins[i]);
       // Left, outside of cone
       else filters[i][f] = 0.0;
     }
   }
-
-  // Store for debugging.
-  filters.bins = bins;
 
   // Here we actually apply the filters one by one. Then we add up the results of each applied filter
   // to get the estimated power contained within that Mel-scale bin.
@@ -134,6 +133,7 @@ function constructMelFilterBank(fftSize, nFilters, lowF, highF, sampleRate) {
     deltaMel: deltaM,
     lowFreq: lowF,
     highFreq: highF,
+    bins: bins,
     filter: function (freqPowers) {
       var ret = [];
 
@@ -143,18 +143,18 @@ function constructMelFilterBank(fftSize, nFilters, lowF, highF, sampleRate) {
           tot += fp * filter[pIx];
         });
         ret[fIx] = tot;
-      }); 
+      });
       return ret;
     }
   };
 }
 
 function melsToHz(mels) {
-  return 700 * (Math.exp(mels / 1127) - 1);
+  return 700 * (Math.pow(10, (mels / 2595)) - 1);
 }
 
 function hzToMels(hertz) {
-  return 1127 * Math.log(1 + hertz/700);
+  return 2595 * Math.log10(1 + hertz / 700);
 }
 
 /**
